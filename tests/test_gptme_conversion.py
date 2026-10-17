@@ -212,3 +212,17 @@ def test_convert_messages_splits_bare_thinking_header():
 
     assert step.reasoning_content == "pondering"
     assert step.message == "OK"
+
+
+def test_gptme_resolves_through_the_agent_factory(tmp_path: Path):
+    from pier.agents.factory import AgentFactory
+    from pier.models.agent.name import AgentName
+
+    agent = AgentFactory.create_agent_from_name(
+        AgentName.GPTME,
+        logs_dir=tmp_path,
+        model_name="openrouter/deepseek/deepseek-v4.1-flash",
+    )
+
+    assert isinstance(agent, Gptme)
+    assert agent.import_path() == "pier.agents.installed.gptme:Gptme"
