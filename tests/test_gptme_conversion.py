@@ -162,3 +162,53 @@ def test_populate_context_reads_conversation_log(tmp_path: Path):
     assert context.n_input_tokens == 7
     assert context.n_output_tokens == 2
     assert context.cost_usd == pytest.approx(0.002)
+
+
+def test_convert_messages_ignores_non_message_events():
+    rows = [
+        {"type": "message", "role": "user", "content": "hi"},
+        {"type": "tool_start", "role": "assistant", "content": "noise"},
+        {"type": "message", "role": "assistant", "content": "hello"},
+    ]
+
+    trajectory = convert_messages(rows, session_id=SESSION, version="0.35.1")
+
+    assert [step.message for step in trajectory.steps] == ["hi", "hello"]
+
+
+def test_convert_messages_splits_inline_reasoning():
+    rows = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": " thinking\nlet me think\n</think>\nOK"},
+    ]
+
+    step = convert_messages(rows, session_id=SESSION, version="0.35.1").steps[1]
+
+    assert step.reasoning_content == "let me think"
+    assert step.message == "OK"
+
+
+def test_unmatched_call_id_kept_as_system_step():
+    rows = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "done"},
+        {"role": "system", "content": "Task complete.", "call_id": "chatcmpl-tool-x"},
+    ]
+
+    trajectory = convert_messages(rows, session_id=SESSION, version="0.35.1")
+
+    assert trajectory.steps[-1].source == "system"
+    assert trajectory.steps[-1].message == "Task complete."
+
+
+def test_convert_messages_splits_bare_thinking_header():
+    # Some providers emit a bare "Thinking" header instead of a think tag.
+    rows = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "Thinking\npondering\n</think" + "ing>\nOK"},
+    ]
+
+    step = convert_messages(rows, session_id=SESSION, version="0.35.1").steps[1]
+
+    assert step.reasoning_content == "pondering"
+    assert step.message == "OK"

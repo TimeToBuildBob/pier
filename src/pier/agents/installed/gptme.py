@@ -129,6 +129,30 @@ def iter_tool_calls(content: str) -> list[tuple[str, str, dict[str, Any]]]:
     return calls
 
 
+_REASONING_OPEN = re.compile(
+    r"^\s*(?:<\s*think(?:ing)?\s*>|Thinking)\s*", re.IGNORECASE
+)
+_REASONING_CLOSE = re.compile(r"<\s*/\s*think(?:ing)?\s*>")
+
+
+def _split_reasoning(content: str) -> tuple[str | None, str]:
+    """Split gptme's inline reasoning block out of the message.
+
+    gptme renders thinking as a ``<think>``/``<thinking>`` block, and some
+    providers emit a bare ``Thinking`` header instead. The closing tag is
+    authoritative; only recognized opening markers are stripped so ordinary
+    text before a closing tag is never silently discarded.
+    """
+    close = _REASONING_CLOSE.search(content)
+    if close is None:
+        return None, content
+    head = content[: close.start()]
+    if not _REASONING_OPEN.match(head):
+        return None, content
+    head = _REASONING_OPEN.sub("", head, count=1)
+    return (head.strip() or None), content[close.end() :].lstrip()
+
+
 def _step_metrics(metadata: dict[str, Any]) -> Metrics | None:
     usage = metadata.get("usage") or {}
     values: dict[str, Any] = {}
@@ -162,23 +186,28 @@ def convert_messages(
     active_action: Step | None = None
 
     for row in messages:
+        # gptme wraps each JSONL row as {"type": "message", ...}; ignore other
+        # event kinds rather than misreading them as conversation turns.
+        if row.get("type", "message") != "message":
+            continue
         role = row.get("role")
         content = row.get("content") or ""
         call_id = row.get("call_id")
 
         if role == "system" and (call_id or active_action):
             target = call_owners.get(call_id) if call_id else active_action
-            if target is None:
+            if target is not None:
+                result = ObservationResult(
+                    content=content, source_call_id=call_id if call_id else None
+                )
+                if target.observation is None:
+                    target.observation = Observation(results=[])
+                target.observation.results.append(result)
+                if call_id:
+                    active_action = None
                 continue
-            result = ObservationResult(
-                content=content, source_call_id=call_id if call_id else None
-            )
-            if target.observation is None:
-                target.observation = Observation(results=[])
-            target.observation.results.append(result)
-            if call_id:
-                active_action = None
-            continue
+            # Unknown call_id: not a tool result for any recorded call. Keep the
+            # text as a plain system step instead of dropping it.
 
         active_action = None
         if role not in ("system", "user", "assistant"):
@@ -192,6 +221,9 @@ def convert_messages(
         )
         if role == "assistant":
             metadata = row.get("metadata") or {}
+            reasoning, content = _split_reasoning(content)
+            step.message = content
+            step.reasoning_content = reasoning
             calls = [
                 ToolCall(
                     tool_call_id=identifier,
@@ -376,7 +408,9 @@ class Gptme(BaseInstalledAgent):
             "gptme --non-interactive --output-format json --tool-format tool "
             f"--model {shlex.quote(model)} "
             f"{shlex.quote(instruction)} "
-            f"2> {agent_logs}/gptme.stderr "
+            # gptme appends piped stdin to the prompt; keep the container's
+            # inherited stdin out of the task instruction.
+            f"< /dev/null 2> {agent_logs}/gptme.stderr "
             f"| tee {agent_logs}/gptme.jsonl"
         )
         await self.exec_as_agent(environment, command=command, env=env, cwd="/app")
